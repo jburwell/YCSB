@@ -1,17 +1,25 @@
 package com.yahoo.ycsb.db;
 
-import com.basho.riak.client.IRiakClient;
 import com.basho.riak.client.IRiakObject;
-import com.basho.riak.client.RiakFactory;
-import com.basho.riak.client.bucket.Bucket;
+import com.basho.riak.client.builders.RiakObjectBuilder;
 import com.basho.riak.client.convert.JSONConverter;
+import com.basho.riak.client.raw.RawClient;
+import com.basho.riak.client.raw.RiakResponse;
+import com.basho.riak.client.raw.pbc.PBClientAdapter;
 import com.basho.riak.client.raw.pbc.PBClientConfig;
+import com.basho.riak.client.raw.pbc.PBClusterClientFactory;
 import com.basho.riak.client.raw.pbc.PBClusterConfig;
+import com.basho.riak.pbc.RiakClient;
+import com.basho.riak.pbc.RiakObject;
 import com.yahoo.ycsb.ByteIterator;
 import com.yahoo.ycsb.DB;
 import com.yahoo.ycsb.DBException;
 import com.yahoo.ycsb.StringByteIterator;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.util.*;
 
 /*
@@ -20,7 +28,8 @@ import java.util.*;
 */
 
 public class RiakClient12 extends DB {
-    IRiakClient riakClient;
+    RiakClient riakClient;
+    RawClient rawClient;
     public static final int OK = 0;
     public static final int ERROR = -1;
     public static final String RIAK_CLUSTER_HOSTS = "riak_cluster_hosts";
@@ -36,7 +45,9 @@ public class RiakClient12 extends DB {
                 String ip = ipAndPort[0].trim();
                 int port = Integer.parseInt(ipAndPort[1].trim());
                 System.out.println("Riak connection to " + ip + ":" + port);
-                riakClient = RiakFactory.pbcClient(ip, port);
+                //riakClient = RiakFactory.pbcClient(ip, port);
+                riakClient = new RiakClient("127.0.0.1");
+                rawClient = new PBClientAdapter(riakClient);
             } else {
                 PBClusterConfig clusterConf = new PBClusterConfig(200);
                 for(String server:servers) {
@@ -50,7 +61,8 @@ public class RiakClient12 extends DB {
                             .withPort(port).build();
                     clusterConf.addClient(node);
                 }
-                riakClient = RiakFactory.newClient(clusterConf);
+                //riakClient = RiakFactory.newClient(clusterConf);
+                PBClusterClientFactory.getInstance().newClient(clusterConf);
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -65,9 +77,15 @@ public class RiakClient12 extends DB {
     public int read(String table, String key, Set<String> fields,
                     HashMap<String, ByteIterator> result) {
         try {
-            Bucket bucket = riakClient.fetchBucket(table).lazyLoadBucketProperties().execute();
-            Map m = bucket.fetch(key, Map.class).execute();
-            StringByteIterator.putAllAsStrings(m, result);
+            RiakResponse resp = rawClient.fetch(table, key);
+            if(resp.hasValue()) {
+                IRiakObject obj = resp.getRiakObjects()[0];
+                @SuppressWarnings("unchecked")
+                HashMap<String, String> m =
+                        (HashMap<String, String>)new JSONConverter(HashMap.class, table).toDomain(obj);
+                StringByteIterator.putAllAsStrings(m, result);
+            }
+
         } catch (Exception e) {
             e.printStackTrace();
             return ERROR;
@@ -83,27 +101,16 @@ public class RiakClient12 extends DB {
 
     public int update(String table, String key,
                       HashMap<String, ByteIterator> values) {
-        try {
-            Bucket bucket = riakClient.fetchBucket(table).lazyLoadBucketProperties().execute();
-            IRiakObject robj = bucket.fetch(key).execute();
-            HashMap<String, String> m = StringByteIterator.getStringMap(values);
-            @SuppressWarnings("unchecked")
-            IRiakObject obj = new JSONConverter(m.getClass(), table, key).fromDomain(m,robj.getVClock());
-            bucket.store(obj);
-        } catch (Exception e) {
-            insert(table, key, values);
-        }
-        return OK;
+        return insert(table, key, values);
     }
 
     public int insert(String table, String key,
                       HashMap<String, ByteIterator> values) {
         try {
-            Bucket bucket = riakClient.fetchBucket(table).lazyLoadBucketProperties().execute();
             HashMap<String, String> m = StringByteIterator.getStringMap(values);
             @SuppressWarnings("unchecked")
-            IRiakObject obj = new JSONConverter(m.getClass(), table, key).fromDomain(m,null);
-            bucket.store(obj);
+            IRiakObject obj = new JSONConverter(HashMap.class, table, key).fromDomain(m, null);
+            rawClient.store(obj);
         } catch (Exception e) {
             e.printStackTrace();
             return ERROR;
@@ -113,7 +120,7 @@ public class RiakClient12 extends DB {
 
     public int delete(String table, String key) {
         try {
-            riakClient.fetchBucket(table).execute().delete(key);
+            riakClient.delete(table,key);
         } catch (Exception e) {
             e.printStackTrace();
             return ERROR;
