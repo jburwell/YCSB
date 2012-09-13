@@ -1,7 +1,7 @@
 package com.yahoo.ycsb.db;
 
 import com.basho.riak.client.IRiakObject;
-import com.basho.riak.client.builders.RiakObjectBuilder;
+import com.basho.riak.client.cap.VClock;
 import com.basho.riak.client.convert.JSONConverter;
 import com.basho.riak.client.raw.RawClient;
 import com.basho.riak.client.raw.RiakResponse;
@@ -10,17 +10,15 @@ import com.basho.riak.client.raw.pbc.PBClientConfig;
 import com.basho.riak.client.raw.pbc.PBClusterClientFactory;
 import com.basho.riak.client.raw.pbc.PBClusterConfig;
 import com.basho.riak.pbc.RiakClient;
-import com.basho.riak.pbc.RiakObject;
 import com.yahoo.ycsb.ByteIterator;
 import com.yahoo.ycsb.DB;
 import com.yahoo.ycsb.DBException;
 import com.yahoo.ycsb.StringByteIterator;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.util.*;
+import java.util.HashMap;
+import java.util.Properties;
+import java.util.Set;
+import java.util.Vector;
 
 /*
   This is considered pre-alpha, gin-inspired code.
@@ -28,8 +26,8 @@ import java.util.*;
 */
 
 public class RiakClient12 extends DB {
-    RiakClient riakClient;
-    RawClient rawClient;
+    //
+    private RawClient rawClient;
     public static final int OK = 0;
     public static final int ERROR = -1;
     public static final String RIAK_CLUSTER_HOSTS = "riak_cluster_hosts";
@@ -39,14 +37,15 @@ public class RiakClient12 extends DB {
         try {
             Properties props = getProperties();
             String cluster_hosts = props.getProperty(RIAK_CLUSTER_HOSTS, RIAK_CLUSTER_HOST_DEFAULT);
+            System.err.println(">>>" + cluster_hosts);
             String[] servers = cluster_hosts.split(",");
+
             if(servers.length == 1) {
                 String[] ipAndPort = servers[0].split(":");
                 String ip = ipAndPort[0].trim();
                 int port = Integer.parseInt(ipAndPort[1].trim());
                 System.out.println("Riak connection to " + ip + ":" + port);
-                //riakClient = RiakFactory.pbcClient(ip, port);
-                riakClient = new RiakClient("127.0.0.1");
+                RiakClient riakClient = new RiakClient("127.0.0.1");
                 rawClient = new PBClientAdapter(riakClient);
             } else {
                 PBClusterConfig clusterConf = new PBClusterConfig(200);
@@ -61,8 +60,7 @@ public class RiakClient12 extends DB {
                             .withPort(port).build();
                     clusterConf.addClient(node);
                 }
-                //riakClient = RiakFactory.newClient(clusterConf);
-                PBClusterClientFactory.getInstance().newClient(clusterConf);
+                rawClient = PBClusterClientFactory.getInstance().newClient(clusterConf);
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -71,7 +69,7 @@ public class RiakClient12 extends DB {
     }
 
     public void cleanup() throws DBException {
-        riakClient.shutdown();
+        rawClient.shutdown();
     }
 
     public int read(String table, String key, Set<String> fields,
@@ -82,7 +80,8 @@ public class RiakClient12 extends DB {
                 IRiakObject obj = resp.getRiakObjects()[0];
                 @SuppressWarnings("unchecked")
                 HashMap<String, String> m =
-                        (HashMap<String, String>)new JSONConverter(HashMap.class, table).toDomain(obj);
+                    (HashMap<String, String>)new JSONConverter(HashMap.class, table).toDomain(obj);
+
                 StringByteIterator.putAllAsStrings(m, result);
             }
 
@@ -101,7 +100,23 @@ public class RiakClient12 extends DB {
 
     public int update(String table, String key,
                       HashMap<String, ByteIterator> values) {
-        return insert(table, key, values);
+        try {
+            HashMap<String, String> m = StringByteIterator.getStringMap(values);
+            @SuppressWarnings("unchecked")
+            IRiakObject obj = new JSONConverter(HashMap.class, table, key).fromDomain(m, null);
+            RiakResponse resp = rawClient.fetch(table, key);
+            if(resp.hasValue()) {
+                IRiakObject robj = resp.getRiakObjects()[0];
+                VClock vc = robj.getVClock();
+                robj.setValue(obj.getValue());
+                rawClient.store(robj);
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ERROR;
+        }
+        return OK;
     }
 
     public int insert(String table, String key,
@@ -120,7 +135,7 @@ public class RiakClient12 extends DB {
 
     public int delete(String table, String key) {
         try {
-            riakClient.delete(table,key);
+            rawClient.delete(table, key);
         } catch (Exception e) {
             e.printStackTrace();
             return ERROR;
